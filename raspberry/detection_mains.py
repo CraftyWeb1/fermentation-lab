@@ -40,10 +40,8 @@ class DetecteurMains:
         vide = {"geste": None, "doigts": 0, "main": False}
         if not self.ok or frame_bgr is None:
             return vide
-        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        rgb.flags.writeable = False
+        rgb = np.ascontiguousarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
         res = self._mains.process(rgb)
-        rgb.flags.writeable = True
         if not res.multi_hand_landmarks:
             return vide
         lm = res.multi_hand_landmarks[0]
@@ -52,7 +50,13 @@ class DetecteurMains:
             label = res.multi_handedness[0].classification[0].label
         doigts = self.doigts_leves(lm, label)
         geste = self.reconnaitre(doigts)
-        return {"geste": geste, "doigts": sum(doigts), "main": True, "landmarks": lm}
+        return {
+            "geste": geste,
+            "doigts": sum(doigts),
+            "leves": doigts,
+            "main": True,
+            "landmarks": lm,
+        }
 
     def doigts_leves(self, lm, label: str) -> list[bool]:
         pts = lm.landmark
@@ -70,9 +74,7 @@ class DetecteurMains:
         pouce, index, majeur, annulaire, auriculaire = doigts
         autres = [index, majeur, annulaire, auriculaire]
         n = sum(autres)
-        if pouce and not any(autres):
-            return "POUCE"
-        if not pouce and not any(autres):
+        if n == 0:
             return "POING"
         if n == 1 and index:
             return "1"

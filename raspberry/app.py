@@ -47,13 +47,14 @@ camera_kind = "sim"
 camera = None
 camera_lock = threading.Lock()
 stop_event = threading.Event()
-DUREE_GESTE = 1.0
-GESTES_MAINS = {0: "POMPE OFF", 1: "POMPE ON", 2: "PELTIER COOL", 4: "PELTIER OFF", 5: "PELTIER OFF"}
+FRAMES_GESTE = 6
+GESTES_MAINS = {0: "POMPE OFF", 1: "POMPE ON", 2: "PELTIER COOL", 3: "PELTIER OFF", 4: "PELTIER OFF", 5: "PELTIER OFF"}
 GESTES_NOMS = {
     "POING": "POMPE OFF",
-    "POUCE": "POMPE ON",
+    "POUCE": "POMPE OFF",
     "1": "POMPE ON",
     "2": "PELTIER COOL",
+    "3": "PELTIER OFF",
     "OUVERTE": "PELTIER OFF",
     "4": "PELTIER OFF",
 }
@@ -110,7 +111,7 @@ Commandes :
   fini
   aide
   quit
-Gestes (tenir 2 s) :
+Gestes :
   poing = pompe off
   1 doigt = pompe on
   2 doigts = froid
@@ -733,13 +734,11 @@ class DetecteurInline:
             self._mains.close()
 
     def analyser(self, frame_bgr: np.ndarray) -> dict:
-        vide = {"doigts": 0, "main": False, "landmarks": None}
+        vide = {"doigts": 0, "main": False, "landmarks": None, "leves": None, "geste": None}
         if not self.ok or frame_bgr is None:
             return vide
-        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        rgb.flags.writeable = False
+        rgb = np.ascontiguousarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
         res = self._mains.process(rgb)
-        rgb.flags.writeable = True
         if not res.multi_hand_landmarks:
             return vide
         lm = res.multi_hand_landmarks[0]
@@ -758,22 +757,13 @@ class DetecteurInline:
             pts[16].y < pts[14].y,
             pts[20].y < pts[18].y,
         ]
-        pouce_ok, index, majeur, annulaire, auriculaire = doigts
-        autres = [index, majeur, annulaire, auriculaire]
-        n_autres = sum(autres)
-        if pouce_ok and not any(autres):
-            nom = "POUCE"
-        elif not pouce_ok and not any(autres):
-            nom = "POING"
-        elif n_autres == 1 and index:
-            nom = "1"
-        elif n_autres == 2 and index and majeur:
-            nom = "2"
-        elif n_autres >= 4 or (n_autres == 4) or (n_autres >= 3 and pouce_ok):
-            nom = "OUVERTE"
-        else:
-            nom = None
-        return {"doigts": sum(doigts), "main": True, "landmarks": lm, "geste": nom}
+        return {
+            "doigts": sum(doigts),
+            "main": True,
+            "landmarks": lm,
+            "leves": doigts,
+            "geste": None,
+        }
 
     def dessiner(self, frame_bgr: np.ndarray, info: dict) -> np.ndarray:
         if info.get("landmarks") is not None:
@@ -806,6 +796,22 @@ def creer_detecteur():
     return None, None
 
 
+def commande_depuis_leves(leves) -> str | None:
+    if not leves or len(leves) < 5:
+        return None
+    index, majeur, annulaire, auriculaire = leves[1], leves[2], leves[3], leves[4]
+    n = int(index) + int(majeur) + int(annulaire) + int(auriculaire)
+    if n == 0:
+        return "POMPE OFF"
+    if n == 1 and index:
+        return "POMPE ON"
+    if n == 2 and index and majeur:
+        return "PELTIER COOL"
+    if n >= 3:
+        return "PELTIER OFF"
+    return None
+
+
 def commande_depuis_main(nombre, nom=None):
     if nom in GESTES_NOMS:
         return GESTES_NOMS[nom]
@@ -818,13 +824,17 @@ def lire_main(kind, det, image):
         image = det.dessiner(image, info)
         if not info.get("main"):
             return None, None, image
+        leves = info.get("leves")
+        if leves:
+            return sum(1 for x in leves if x), commande_depuis_leves(leves), image
         n = info.get("doigts")
         return n, commande_depuis_main(n, info.get("geste")), image
     mains, image = det.findHands(image)
     if not mains:
         return None, None, image
-    n = det.fingersUp(mains[0]).count(1)
-    return n, commande_depuis_main(n), image
+    leves = det.fingersUp(mains[0])
+    n = leves.count(1)
+    return n, commande_depuis_leves(leves) or commande_depuis_main(n), image
 
 
 def publier_geste() -> None:
@@ -867,71 +877,77 @@ def boucle_gestes() -> None:
         log("Camera absente : pas de gestes")
         return
     kind, det = creer_detecteur()
-    if det is None:
-        return
     dernier = None
-    debut = time.monotonic()
+    compteur = 0
+    vides = 0
     deja_execute = False
-    log("Mains : poing=pompe off  1=pompe on  2=froid  ouverte=peltier off  (tenir 1 s)")
+    log("Mains : poing=pompe off  1 doigt=pompe on  2=froid  ouverte=stop")
     log("Q ferme la fenetre camera")
-    perdu_depuis = None
+    t_log = 0.0
     try:
         while not stop_event.is_set():
             image = capturer(legende=False)
-            nombre, geste, image = lire_main(kind, det, image)
+            nombre = None
+            geste = None
+            if det is not None:
+                try:
+                    nombre, geste, image = lire_main(kind, det, image)
+                except Exception as exc:
+                    log(f"Detection main : {exc}")
             image = cv2.flip(image, 1)
-            maintenant = time.monotonic()
             if geste is None:
-                if perdu_depuis is None:
-                    perdu_depuis = maintenant
-                if maintenant - perdu_depuis >= 0.4:
+                vides += 1
+                if vides >= 5:
                     dernier = None
+                    compteur = 0
                     deja_execute = False
             else:
-                perdu_depuis = None
-                if geste != dernier:
+                vides = 0
+                if geste == dernier:
+                    compteur += 1
+                else:
                     dernier = geste
-                    debut = maintenant
+                    compteur = 1
                     deja_execute = False
+                if not deja_execute and compteur >= FRAMES_GESTE:
+                    commander_geste(geste)
+                    deja_execute = True
             nouveau = geste or "AUCUN"
-            changer = False
             with etat_lock:
-                if nouveau != etat.get("geste"):
-                    etat["geste"] = nouveau
-                    changer = True
-            if changer:
-                publier_geste()
-            if geste and not deja_execute and (maintenant - debut) >= DUREE_GESTE:
-                commander_geste(geste)
-                deja_execute = True
-            with etat_lock:
+                etat["geste"] = nouveau
                 pompe = "ON" if etat["pump"] else "OFF"
                 peltier = etat["peltier"]
                 confirme = etat.get("geste_confirme", "AUCUN")
                 connecte = etat["connected"]
-            cv2.rectangle(image, (0, 42), (image.shape[1], 190), (25, 25, 25), -1)
-            lignes = [
-                f"FERMIA - {'ARDUINO' if connecte else 'SIMULATION'}",
-                f"Doigts: {nombre if nombre is not None else '-'}  Geste: {nouveau}",
-                f"Pompe: {pompe}  Peltier: {peltier}",
-                f"Confirme: {confirme}",
-            ]
+            maintenant = time.monotonic()
+            if maintenant - t_log >= 2.0:
+                t_log = maintenant
+                log(f"Cam : doigts={nombre if nombre is not None else '-'}  geste={nouveau}")
+            cv2.rectangle(image, (0, 0), (image.shape[1], 170), (25, 25, 25), -1)
+            if det is None:
+                lignes = ["MediaPipe absent", "pip install mediapipe", "puis relance python app.py"]
+            else:
+                lignes = [
+                    f"FERMIA - {'ARDUINO' if connecte else 'SIMULATION'}",
+                    f"Doigts: {nombre if nombre is not None else '-'}  -> {nouveau}",
+                    f"Pompe: {pompe}  Peltier: {peltier}  OK:{confirme}",
+                    "poing=pompe off  1=pompe on  2=froid  ouverte=stop",
+                ]
             for i, ligne in enumerate(lignes):
                 cv2.putText(
                     image,
                     ligne,
-                    (10, 65 + i * 36),
+                    (10, 28 + i * 32),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.57,
+                    0.55,
                     (230, 255, 230),
                     2,
                 )
             if geste and not deja_execute:
-                reste = max(0, DUREE_GESTE - (maintenant - debut))
                 cv2.putText(
                     image,
-                    f"Maintenir: {reste:.1f}s",
-                    (10, 235),
+                    f"tiens... {compteur}/{FRAMES_GESTE}",
+                    (10, 200),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.7,
                     (0, 200, 255),
@@ -942,7 +958,7 @@ def boucle_gestes() -> None:
                 log("Fenetre camera fermee. Tape quit pour arreter.")
                 break
     finally:
-        if kind == "cours" and hasattr(det, "fermer"):
+        if det is not None and kind == "cours" and hasattr(det, "fermer"):
             det.fermer()
         cv2.destroyAllWindows()
 
