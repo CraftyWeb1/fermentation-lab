@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import threading
 import time
 from datetime import datetime
@@ -107,14 +108,25 @@ def trouver_port() -> str | None:
     force = os.environ.get("ARDUINO_PORT")
     if force:
         return force
+    for candidat in ("/dev/cu.usbmodem2101",):
+        if os.path.exists(candidat):
+            return candidat
+    ignores = ("debug-console", "bluetooth", "incoming", "wlan")
+    bons = []
     for port in list_ports.comports():
+        nom = (port.device or "").lower()
         desc = (port.description or "").lower()
-        if "arduino" in desc or "ch340" in desc or "usb serial" in desc:
-            return port.device
-        if port.device.startswith("/dev/ttyACM") or port.device.startswith("/dev/ttyUSB"):
-            return port.device
-    ports = list(list_ports.comports())
-    return ports[0].device if ports else None
+        if any(x in nom or x in desc for x in ignores):
+            continue
+        texte = f"{nom} {desc}"
+        if any(x in texte for x in ("arduino", "ch340", "usbserial", "usbmodem", "wchusbserial", "cp210")):
+            bons.append(port.device)
+            continue
+        if nom.startswith("/dev/ttyacm") or nom.startswith("/dev/ttyusb"):
+            bons.append(port.device)
+    if bons:
+        return bons[0]
+    return None
 
 
 def ligne_etat() -> str:
@@ -538,7 +550,7 @@ def demarrer_aliot() -> None:
 def ouvrir_camera():
     global camera_kind, camera
     try:
-        from picamera2 import Picamera2
+        from picamera2 import Picamera2  # type: ignore[import-not-found]
 
         cam = Picamera2()
         cam.configure(cam.create_still_configuration(main={"size": (640, 480)}))
@@ -551,13 +563,21 @@ def ouvrir_camera():
         log(f"Picamera2 indisponible ({exc})")
 
     index = int(os.environ.get("CAMERA", "0"))
-    cap = cv2.VideoCapture(index)
-    if cap.isOpened():
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        camera_kind, camera = "cv", cap
-        log(f"Caméra OpenCV : OK (index {index})")
-        return
+    if sys.platform == "win32":
+        backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
+    elif sys.platform == "darwin":
+        backends = [cv2.CAP_AVFOUNDATION, cv2.CAP_ANY]
+    else:
+        backends = [cv2.CAP_ANY]
+    for backend in backends:
+        cap = cv2.VideoCapture(index, backend)
+        if cap.isOpened():
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            camera_kind, camera = "cv", cap
+            log(f"Caméra OpenCV : OK (index {index})")
+            return
+        cap.release()
 
     camera_kind, camera = "sim", None
     log("Caméra absente : photos simulées")
