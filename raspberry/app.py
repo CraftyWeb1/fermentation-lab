@@ -36,6 +36,8 @@ etat = {
     "buzz": 0,
     "lcd": "",
     "connected": False,
+    "geste": "AUCUN",
+    "geste_confirme": "AUCUN",
 }
 etat_lock = threading.Lock()
 print_lock = threading.Lock()
@@ -43,6 +45,10 @@ arduino = None
 arduino_lock = threading.Lock()
 camera_kind = "sim"
 camera = None
+camera_lock = threading.Lock()
+stop_event = threading.Event()
+DUREE_GESTE = 2.0
+GESTES_MAINS = {0: "POMPE OFF", 1: "POMPE ON", 2: "PELTIER COOL", 5: "PELTIER OFF"}
 AFFICHE_TOUTES_LES_S = 10.0
 _t_affichage = 0.0
 _cle_etat = ""
@@ -96,6 +102,11 @@ Commandes :
   fini
   aide
   quit
+Gestes (tenir 2 s) :
+  poing = pompe off
+  1 doigt = pompe on
+  2 doigts = froid
+  main ouverte = peltier off
 """
 
 
@@ -180,6 +191,8 @@ def document_aliot() -> dict:
             "/doc/buzzer": 2700 if etat.get("buzz") else 0,
             "/doc/lcd_message": etat.get("lcd")
             or f"{etat['profile']} {etat['mode']} {etat['peltier']}",
+            "/doc/geste": etat.get("geste", "AUCUN"),
+            "/doc/geste_confirme": etat.get("geste_confirme", "AUCUN"),
         }
 
 
@@ -296,9 +309,13 @@ def envoyer(commande: str) -> bool:
     with arduino_lock:
         if arduino is None:
             return False
-        arduino.write((commande.strip() + "\n").encode("utf-8"))
-        arduino.flush()
-        return True
+        try:
+            arduino.write((commande.strip() + "\n").encode("utf-8"))
+            arduino.flush()
+            return True
+        except (serial.SerialException, OSError) as exc:
+            log(f"Erreur envoi Arduino : {exc}")
+            return False
 
 
 def appliquer_local(commande: str) -> None:
@@ -553,7 +570,10 @@ def ouvrir_camera():
         from picamera2 import Picamera2  # type: ignore[import-not-found]
 
         cam = Picamera2()
-        cam.configure(cam.create_still_configuration(main={"size": (640, 480)}))
+        try:
+            cam.configure(cam.create_preview_configuration(main={"size": (640, 480)}))
+        except Exception:
+            cam.configure(cam.create_still_configuration(main={"size": (640, 480)}))
         cam.start()
         time.sleep(0.4)
         camera_kind, camera = "pi", cam
@@ -598,10 +618,12 @@ def frame_simulation() -> np.ndarray:
 
 def capturer() -> np.ndarray:
     if camera_kind == "pi":
-        rgb = camera.capture_array()
+        with camera_lock:
+            rgb = camera.capture_array()
         frame = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     elif camera_kind == "cv":
-        ok, frame = camera.read()
+        with camera_lock:
+            ok, frame = camera.read()
         if not ok:
             frame = frame_simulation()
     else:
@@ -665,25 +687,244 @@ def executer(saisie: str) -> bool:
     return True
 
 
+class DetecteurInline:
+    def __init__(self):
+        self.ok = False
+        self._mains = None
+        try:
+            import mediapipe as mp
+
+            self._mp = mp
+            self._mains = mp.solutions.hands.Hands(
+                static_image_mode=False,
+                max_num_hands=1,
+                min_detection_confidence=0.7,
+                min_tracking_confidence=0.6,
+            )
+            self._dessin = mp.solutions.drawing_utils
+            self._liens = mp.solutions.hands.HAND_CONNECTIONS
+            self.ok = True
+        except Exception:
+            self.ok = False
+
+    def fermer(self) -> None:
+        if self._mains is not None:
+            self._mains.close()
+
+    def analyser(self, frame_bgr: np.ndarray) -> dict:
+        vide = {"doigts": 0, "main": False, "landmarks": None}
+        if not self.ok or frame_bgr is None:
+            return vide
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        rgb.flags.writeable = False
+        res = self._mains.process(rgb)
+        rgb.flags.writeable = True
+        if not res.multi_hand_landmarks:
+            return vide
+        lm = res.multi_hand_landmarks[0]
+        label = "Right"
+        if res.multi_handedness:
+            label = res.multi_handedness[0].classification[0].label
+        pts = lm.landmark
+        if label == "Right":
+            pouce = pts[4].x < pts[3].x
+        else:
+            pouce = pts[4].x > pts[3].x
+        doigts = [
+            pouce,
+            pts[8].y < pts[6].y,
+            pts[12].y < pts[10].y,
+            pts[16].y < pts[14].y,
+            pts[20].y < pts[18].y,
+        ]
+        return {"doigts": sum(doigts), "main": True, "landmarks": lm}
+
+    def dessiner(self, frame_bgr: np.ndarray, info: dict) -> np.ndarray:
+        if info.get("landmarks") is not None:
+            self._dessin.draw_landmarks(frame_bgr, info["landmarks"], self._liens)
+        return frame_bgr
+
+
+def creer_detecteur():
+    try:
+        from detection_mains import DetecteurMains
+
+        det = DetecteurMains()
+        if det.ok:
+            log("MediaPipe : DetecteurMains")
+            return "cours", det
+    except Exception:
+        pass
+    try:
+        from quickhands import HandDetector
+
+        log("MediaPipe : quickhands")
+        return "quickhands", HandDetector(maxHands=1)
+    except Exception:
+        pass
+    det = DetecteurInline()
+    if det.ok:
+        log("MediaPipe : integre dans app.py")
+        return "cours", det
+    log("MediaPipe absent : pip install mediapipe")
+    return None, None
+
+
+def lire_main(kind, det, image):
+    if kind == "cours":
+        info = det.analyser(image)
+        image = det.dessiner(image, info)
+        if not info.get("main"):
+            return None, None, image
+        return info.get("doigts"), GESTES_MAINS.get(info.get("doigts")), image
+    mains, image = det.findHands(image)
+    if not mains:
+        return None, None, image
+    n = det.fingersUp(mains[0]).count(1)
+    return n, GESTES_MAINS.get(n), image
+
+
+def publier_geste() -> None:
+    with iot_lock:
+        obj = iot
+    if obj is None:
+        return
+    with etat_lock:
+        doc = {
+            "/doc/geste": etat.get("geste", "AUCUN"),
+            "/doc/geste_confirme": etat.get("geste_confirme", "AUCUN"),
+        }
+    try:
+        obj.update_doc(doc)
+    except Exception as exc:
+        log(f"ALIVEcode geste : {exc}")
+
+
+def commander_geste(geste: str) -> None:
+    commandes = {
+        "POMPE ON": "CMD;PUMP=1",
+        "POMPE OFF": "CMD;PUMP=0",
+        "PELTIER COOL": "CMD;PELTIER=COOL",
+        "PELTIER OFF": "CMD;PELTIER=OFF",
+    }
+    commande = commandes[geste]
+    if envoyer(commande):
+        log(f"Geste -> Arduino : {commande}")
+    else:
+        appliquer_local(commande)
+        log(f"Geste -> simulation : {commande}")
+        pousser_aliot()
+    with etat_lock:
+        etat["geste_confirme"] = geste
+    publier_geste()
+
+
+def boucle_gestes() -> None:
+    if camera_kind == "sim":
+        log("Camera absente : pas de gestes")
+        return
+    kind, det = creer_detecteur()
+    if det is None:
+        return
+    dernier = None
+    debut = time.monotonic()
+    deja_execute = False
+    log("Mains : 0=pompe off  1=pompe on  2=froid  5=peltier off  (tenir 2 s)")
+    log("Q ferme la fenetre camera")
+    try:
+        while not stop_event.is_set():
+            image = capturer()
+            image = cv2.flip(image, 1)
+            nombre, geste, image = lire_main(kind, det, image)
+            if geste != dernier:
+                dernier = geste
+                debut = time.monotonic()
+                deja_execute = False
+            nouveau = geste or "AUCUN"
+            maintenant = time.monotonic()
+            changer = False
+            with etat_lock:
+                if nouveau != etat.get("geste"):
+                    etat["geste"] = nouveau
+                    changer = True
+            if changer:
+                publier_geste()
+            if geste and not deja_execute and (maintenant - debut) >= DUREE_GESTE:
+                commander_geste(geste)
+                deja_execute = True
+            with etat_lock:
+                pompe = "ON" if etat["pump"] else "OFF"
+                peltier = etat["peltier"]
+                confirme = etat.get("geste_confirme", "AUCUN")
+                connecte = etat["connected"]
+            cv2.rectangle(image, (0, 42), (image.shape[1], 190), (25, 25, 25), -1)
+            lignes = [
+                f"FERMIA - {'ARDUINO' if connecte else 'SIMULATION'}",
+                f"Doigts: {nombre if nombre is not None else '-'}  Geste: {nouveau}",
+                f"Pompe: {pompe}  Peltier: {peltier}",
+                f"Confirme: {confirme}",
+            ]
+            for i, ligne in enumerate(lignes):
+                cv2.putText(
+                    image,
+                    ligne,
+                    (10, 65 + i * 36),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.57,
+                    (230, 255, 230),
+                    2,
+                )
+            if geste and not deja_execute:
+                reste = max(0, DUREE_GESTE - (maintenant - debut))
+                cv2.putText(
+                    image,
+                    f"Maintenir: {reste:.1f}s",
+                    (10, 235),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0, 200, 255),
+                    2,
+                )
+            cv2.imshow("Fermia - mains", image)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                log("Fenetre camera fermee. Tape quit pour arreter.")
+                break
+    finally:
+        if kind == "cours" and hasattr(det, "fermer"):
+            det.fermer()
+        cv2.destroyAllWindows()
+
+
+def boucle_terminal() -> None:
+    while not stop_event.is_set():
+        try:
+            saisie = input("> ")
+        except (EOFError, KeyboardInterrupt):
+            stop_event.set()
+            return
+        if not executer(saisie):
+            stop_event.set()
+            return
+
+
 def main() -> None:
     log("Fermia")
     log(AIDE)
     ouvrir_camera()
     demarrer_aliot()
-    threading.Thread(target=boucle_serie, daemon=True).start()
+    threading.Thread(target=boucle_serie, daemon=True, name="arduino").start()
+    threading.Thread(target=boucle_terminal, daemon=True, name="terminal").start()
     time.sleep(0.3)
-    log("Pret.")
+    log("Pret. Tape les commandes ici. Fenetre camera = gestes.")
     try:
-        while True:
-            try:
-                saisie = input("> ")
-            except EOFError:
-                break
-            if not executer(saisie):
-                break
+        boucle_gestes()
+        while not stop_event.is_set():
+            time.sleep(0.2)
     except KeyboardInterrupt:
         log("\nArret.")
-    log("Termine.")
+    finally:
+        stop_event.set()
+        log("Termine.")
 
 
 if __name__ == "__main__":
