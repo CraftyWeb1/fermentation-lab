@@ -781,13 +781,6 @@ def creer_detecteur():
             return "cours", det
     except Exception:
         pass
-    try:
-        from quickhands import HandDetector
-
-        log("MediaPipe : quickhands")
-        return "quickhands", HandDetector(maxHands=1)
-    except Exception:
-        pass
     det = DetecteurInline()
     if det.ok:
         log("MediaPipe : integre dans app.py")
@@ -818,23 +811,16 @@ def commande_depuis_main(nombre, nom=None):
     return GESTES_MAINS.get(nombre)
 
 
-def lire_main(kind, det, image):
-    if kind == "cours":
-        info = det.analyser(image)
-        image = det.dessiner(image, info)
-        if not info.get("main"):
-            return None, None, image
-        leves = info.get("leves")
-        if leves:
-            return sum(1 for x in leves if x), commande_depuis_leves(leves), image
-        n = info.get("doigts")
-        return n, commande_depuis_main(n, info.get("geste")), image
-    mains, image = det.findHands(image)
-    if not mains:
+def lire_main(_kind, det, image):
+    info = det.analyser(image)
+    image = det.dessiner(image, info)
+    if not info.get("main"):
         return None, None, image
-    leves = det.fingersUp(mains[0])
-    n = leves.count(1)
-    return n, commande_depuis_leves(leves) or commande_depuis_main(n), image
+    leves = info.get("leves")
+    if leves:
+        return sum(1 for x in leves if x), commande_depuis_leves(leves), image
+    n = info.get("doigts")
+    return n, commande_depuis_main(n, info.get("geste")), image
 
 
 def publier_geste() -> None:
