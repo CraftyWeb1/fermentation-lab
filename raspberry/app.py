@@ -47,8 +47,16 @@ camera_kind = "sim"
 camera = None
 camera_lock = threading.Lock()
 stop_event = threading.Event()
-DUREE_GESTE = 2.0
-GESTES_MAINS = {0: "POMPE OFF", 1: "POMPE ON", 2: "PELTIER COOL", 5: "PELTIER OFF"}
+DUREE_GESTE = 1.0
+GESTES_MAINS = {0: "POMPE OFF", 1: "POMPE ON", 2: "PELTIER COOL", 4: "PELTIER OFF", 5: "PELTIER OFF"}
+GESTES_NOMS = {
+    "POING": "POMPE OFF",
+    "POUCE": "POMPE ON",
+    "1": "POMPE ON",
+    "2": "PELTIER COOL",
+    "OUVERTE": "PELTIER OFF",
+    "4": "PELTIER OFF",
+}
 AFFICHE_TOUTES_LES_S = 10.0
 _t_affichage = 0.0
 _cle_etat = ""
@@ -616,7 +624,7 @@ def frame_simulation() -> np.ndarray:
     return img
 
 
-def capturer() -> np.ndarray:
+def capturer(legende: bool = True) -> np.ndarray:
     if camera_kind == "pi":
         with camera_lock:
             rgb = camera.capture_array()
@@ -628,6 +636,9 @@ def capturer() -> np.ndarray:
             frame = frame_simulation()
     else:
         frame = frame_simulation()
+
+    if not legende:
+        return frame
 
     with etat_lock:
         t = etat["temp"]
@@ -695,16 +706,26 @@ class DetecteurInline:
             import mediapipe as mp
 
             self._mp = mp
-            self._mains = mp.solutions.hands.Hands(
-                static_image_mode=False,
-                max_num_hands=1,
-                min_detection_confidence=0.7,
-                min_tracking_confidence=0.6,
-            )
+            try:
+                self._mains = mp.solutions.hands.Hands(
+                    static_image_mode=False,
+                    max_num_hands=1,
+                    model_complexity=1,
+                    min_detection_confidence=0.5,
+                    min_tracking_confidence=0.5,
+                )
+            except TypeError:
+                self._mains = mp.solutions.hands.Hands(
+                    static_image_mode=False,
+                    max_num_hands=1,
+                    min_detection_confidence=0.5,
+                    min_tracking_confidence=0.5,
+                )
             self._dessin = mp.solutions.drawing_utils
             self._liens = mp.solutions.hands.HAND_CONNECTIONS
             self.ok = True
-        except Exception:
+        except Exception as exc:
+            log(f"MediaPipe Hands : {exc}")
             self.ok = False
 
     def fermer(self) -> None:
@@ -737,7 +758,22 @@ class DetecteurInline:
             pts[16].y < pts[14].y,
             pts[20].y < pts[18].y,
         ]
-        return {"doigts": sum(doigts), "main": True, "landmarks": lm}
+        pouce_ok, index, majeur, annulaire, auriculaire = doigts
+        autres = [index, majeur, annulaire, auriculaire]
+        n_autres = sum(autres)
+        if pouce_ok and not any(autres):
+            nom = "POUCE"
+        elif not pouce_ok and not any(autres):
+            nom = "POING"
+        elif n_autres == 1 and index:
+            nom = "1"
+        elif n_autres == 2 and index and majeur:
+            nom = "2"
+        elif n_autres >= 4 or (n_autres == 4) or (n_autres >= 3 and pouce_ok):
+            nom = "OUVERTE"
+        else:
+            nom = None
+        return {"doigts": sum(doigts), "main": True, "landmarks": lm, "geste": nom}
 
     def dessiner(self, frame_bgr: np.ndarray, info: dict) -> np.ndarray:
         if info.get("landmarks") is not None:
@@ -770,18 +806,25 @@ def creer_detecteur():
     return None, None
 
 
+def commande_depuis_main(nombre, nom=None):
+    if nom in GESTES_NOMS:
+        return GESTES_NOMS[nom]
+    return GESTES_MAINS.get(nombre)
+
+
 def lire_main(kind, det, image):
     if kind == "cours":
         info = det.analyser(image)
         image = det.dessiner(image, info)
         if not info.get("main"):
             return None, None, image
-        return info.get("doigts"), GESTES_MAINS.get(info.get("doigts")), image
+        n = info.get("doigts")
+        return n, commande_depuis_main(n, info.get("geste")), image
     mains, image = det.findHands(image)
     if not mains:
         return None, None, image
     n = det.fingersUp(mains[0]).count(1)
-    return n, GESTES_MAINS.get(n), image
+    return n, commande_depuis_main(n), image
 
 
 def publier_geste() -> None:
@@ -829,19 +872,28 @@ def boucle_gestes() -> None:
     dernier = None
     debut = time.monotonic()
     deja_execute = False
-    log("Mains : 0=pompe off  1=pompe on  2=froid  5=peltier off  (tenir 2 s)")
+    log("Mains : poing=pompe off  1=pompe on  2=froid  ouverte=peltier off  (tenir 1 s)")
     log("Q ferme la fenetre camera")
+    perdu_depuis = None
     try:
         while not stop_event.is_set():
-            image = capturer()
-            image = cv2.flip(image, 1)
+            image = capturer(legende=False)
             nombre, geste, image = lire_main(kind, det, image)
-            if geste != dernier:
-                dernier = geste
-                debut = time.monotonic()
-                deja_execute = False
-            nouveau = geste or "AUCUN"
+            image = cv2.flip(image, 1)
             maintenant = time.monotonic()
+            if geste is None:
+                if perdu_depuis is None:
+                    perdu_depuis = maintenant
+                if maintenant - perdu_depuis >= 0.4:
+                    dernier = None
+                    deja_execute = False
+            else:
+                perdu_depuis = None
+                if geste != dernier:
+                    dernier = geste
+                    debut = maintenant
+                    deja_execute = False
+            nouveau = geste or "AUCUN"
             changer = False
             with etat_lock:
                 if nouveau != etat.get("geste"):
