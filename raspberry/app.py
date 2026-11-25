@@ -49,13 +49,20 @@ camera_lock = threading.Lock()
 stop_event = threading.Event()
 erreur_mediapipe = ""
 FRAMES_GESTE = 6
-GESTES_MAINS = {0: "POMPE OFF", 1: "POMPE ON", 2: "PELTIER COOL", 3: "PELTIER OFF", 4: "PELTIER OFF", 5: "PELTIER OFF"}
+GESTES_MAINS = {
+    0: "POMPE OFF",
+    1: "POMPE ON",
+    2: "PELTIER COOL",
+    3: "PELTIER HEAT",
+    4: "PELTIER OFF",
+    5: "PELTIER OFF",
+}
 GESTES_NOMS = {
     "POING": "POMPE OFF",
-    "POUCE": "POMPE OFF",
+    "POUCE": "BUZZER OFF",
     "1": "POMPE ON",
     "2": "PELTIER COOL",
-    "3": "PELTIER OFF",
+    "3": "PELTIER HEAT",
     "OUVERTE": "PELTIER OFF",
     "4": "PELTIER OFF",
 }
@@ -101,6 +108,8 @@ COMMANDES = {
     "voff": "CMD;FAN=0",
     "ventilo_on": "CMD;FAN=1",
     "ventilo_off": "CMD;FAN=0",
+    "silence": "CMD;BUZZER=0",
+    "bipoff": "CMD;BUZZER=0",
 }
 AIDE = """
 Commandes :
@@ -114,9 +123,11 @@ Commandes :
   quit
 Gestes :
   poing = pompe off
+  pouce = buzzer off
   1 doigt = pompe on
   2 doigts = froid
-  main ouverte = peltier off
+  3 doigts = chaud
+  main ouverte = stop (peltier + ventilo)
 """
 
 
@@ -364,7 +375,7 @@ def appliquer_local(commande: str) -> None:
             etat["peltier"] = commande.split("PELTIER=", 1)[1].strip()
             etat["mode"] = "MANUAL"
             etat["pump"] = 1 if etat["peltier"] == "HEAT" else 0
-            etat["fan"] = 1 if etat["peltier"] == "COOL" else 0
+            etat["fan"] = 0 if etat["peltier"] == "OFF" else 1
         elif "MODE=AUTO" in commande:
             etat["mode"] = "AUTO"
         elif "MODE=MANUAL" in commande:
@@ -520,7 +531,7 @@ def recevoir_cmd_froid(data=None, *args, **kwargs) -> None:
 
 
 def recevoir_cmd_stop_peltier(data=None, *args, **kwargs) -> None:
-    envoyer_ou_simuler("CMD;PELTIER=OFF")
+    arreter_climat()
 
 
 def brancher_action(obj, action_id: str, callback) -> None:
@@ -702,6 +713,9 @@ def executer(saisie: str) -> bool:
     if cmd == "photo":
         prendre_photo()
         return True
+    if cmd in ("stop", "off"):
+        arreter_climat()
+        return True
     if cmd.startswith("sp "):
         try:
             valeur = float(cmd.split()[1])
@@ -725,10 +739,58 @@ def executer(saisie: str) -> bool:
     return True
 
 
+LIENS_MAIN = (
+    (0, 1), (1, 2), (2, 3), (3, 4),
+    (0, 5), (5, 6), (6, 7), (7, 8),
+    (0, 9), (9, 10), (10, 11), (11, 12),
+    (0, 13), (13, 14), (14, 15), (15, 16),
+    (0, 17), (17, 18), (18, 19), (19, 20),
+    (5, 9), (9, 13), (13, 17),
+)
+MODELE_MAINS = ROOT / "models" / "hand_landmarker.task"
+URL_MODELE_MAINS = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+)
+
+
+def _xy(pt):
+    return float(pt.x), float(pt.y)
+
+
+def leves_depuis_pts(pts, label: str = "Right") -> list[bool]:
+    if label == "Right":
+        pouce = pts[4].x < pts[3].x
+    else:
+        pouce = pts[4].x > pts[3].x
+    return [
+        pouce,
+        pts[8].y < pts[6].y,
+        pts[12].y < pts[10].y,
+        pts[16].y < pts[14].y,
+        pts[20].y < pts[18].y,
+    ]
+
+
+def dessiner_squelette(frame_bgr: np.ndarray, pts) -> np.ndarray:
+    h, w = frame_bgr.shape[:2]
+    pixels = []
+    for pt in pts:
+        x, y = _xy(pt)
+        pixels.append((int(x * w), int(y * h)))
+    for a, b in LIENS_MAIN:
+        cv2.line(frame_bgr, pixels[a], pixels[b], (0, 255, 0), 2)
+    for x, y in pixels:
+        cv2.circle(frame_bgr, (x, y), 4, (0, 200, 255), -1)
+    return frame_bgr
+
+
 def _charger_hands(confiance: float = 0.5):
     import mediapipe as mp
 
-    log(f"MediaPipe {getattr(mp, '__version__', '?')}  {getattr(mp, '__file__', '?')}")
+    log(f"MediaPipe {getattr(mp, '__version__', '?')}")
+    if not hasattr(mp, "solutions"):
+        raise AttributeError("cette version n'a pas mediapipe.solutions")
     kwargs = dict(
         static_image_mode=False,
         max_num_hands=1,
@@ -742,6 +804,17 @@ def _charger_hands(confiance: float = 0.5):
     return mains, mp.solutions.drawing_utils, mp.solutions.hands.HAND_CONNECTIONS
 
 
+def assurer_modele_mains() -> Path:
+    MODELE_MAINS.parent.mkdir(exist_ok=True)
+    if MODELE_MAINS.exists() and MODELE_MAINS.stat().st_size > 10_000:
+        return MODELE_MAINS
+    log("Telechargement du modele mains (une fois)...")
+    import urllib.request
+
+    urllib.request.urlretrieve(URL_MODELE_MAINS, MODELE_MAINS)
+    return MODELE_MAINS
+
+
 class DetecteurInline:
     def __init__(self):
         self.ok = False
@@ -750,7 +823,7 @@ class DetecteurInline:
             self._mains, self._dessin, self._liens = _charger_hands(0.5)
             self.ok = True
         except Exception as exc:
-            log(f"MediaPipe Hands : {exc}")
+            log(f"MediaPipe solutions : {exc}")
             self.ok = False
             self.erreur = str(exc)
 
@@ -770,34 +843,100 @@ class DetecteurInline:
         label = "Right"
         if res.multi_handedness:
             label = res.multi_handedness[0].classification[0].label
-        pts = lm.landmark
-        if label == "Right":
-            pouce = pts[4].x < pts[3].x
-        else:
-            pouce = pts[4].x > pts[3].x
-        doigts = [
-            pouce,
-            pts[8].y < pts[6].y,
-            pts[12].y < pts[10].y,
-            pts[16].y < pts[14].y,
-            pts[20].y < pts[18].y,
-        ]
+        doigts = leves_depuis_pts(lm.landmark, label)
         return {
             "doigts": sum(doigts),
             "main": True,
-            "landmarks": lm,
+            "landmarks": lm.landmark,
             "leves": doigts,
             "geste": None,
         }
 
     def dessiner(self, frame_bgr: np.ndarray, info: dict) -> np.ndarray:
         if info.get("landmarks") is not None:
-            self._dessin.draw_landmarks(frame_bgr, info["landmarks"], self._liens)
+            try:
+                self._dessin.draw_landmarks(frame_bgr, info["landmarks"], self._liens)
+            except Exception:
+                dessiner_squelette(frame_bgr, info["landmarks"])
+        return frame_bgr
+
+
+class DetecteurTasks:
+    def __init__(self):
+        self.ok = False
+        self._mains = None
+        try:
+            import mediapipe as mp
+
+            try:
+                from mediapipe.tasks.python.core.base_options import BaseOptions
+                from mediapipe.tasks.python.vision import hand_landmarker as hl
+
+                options_cls = hl.HandLandmarkerOptions
+                landmarker_cls = hl.HandLandmarker
+            except Exception:
+                from mediapipe.tasks.python import BaseOptions
+                from mediapipe.tasks.python import vision as hl
+
+                options_cls = hl.HandLandmarkerOptions
+                landmarker_cls = hl.HandLandmarker
+
+            modele = assurer_modele_mains()
+            options = options_cls(
+                base_options=BaseOptions(model_asset_path=str(modele)),
+                num_hands=1,
+                min_hand_detection_confidence=0.5,
+            )
+            self._mains = landmarker_cls.create_from_options(options)
+            self._Image = mp.Image
+            self._Format = mp.ImageFormat
+            self.ok = True
+        except Exception as exc:
+            log(f"MediaPipe tasks : {exc}")
+            self.ok = False
+            self.erreur = str(exc)
+
+    def fermer(self) -> None:
+        if self._mains is not None:
+            try:
+                self._mains.close()
+            except Exception:
+                pass
+
+    def analyser(self, frame_bgr: np.ndarray) -> dict:
+        vide = {"doigts": 0, "main": False, "landmarks": None, "leves": None, "geste": None}
+        if not self.ok or frame_bgr is None:
+            return vide
+        rgb = np.ascontiguousarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
+        image = self._Image(image_format=self._Format.SRGB, data=rgb)
+        res = self._mains.detect(image)
+        if not res.hand_landmarks:
+            return vide
+        pts = res.hand_landmarks[0]
+        label = "Right"
+        if res.handedness:
+            try:
+                label = res.handedness[0][0].category_name
+            except Exception:
+                pass
+        doigts = leves_depuis_pts(pts, label)
+        return {
+            "doigts": sum(doigts),
+            "main": True,
+            "landmarks": pts,
+            "leves": doigts,
+            "geste": None,
+        }
+
+    def dessiner(self, frame_bgr: np.ndarray, info: dict) -> np.ndarray:
+        if info.get("landmarks") is not None:
+            dessiner_squelette(frame_bgr, info["landmarks"])
         return frame_bgr
 
 
 def creer_detecteur():
     global erreur_mediapipe
+    essais = []
     try:
         from detection_mains import DetecteurMains
 
@@ -805,39 +944,47 @@ def creer_detecteur():
         if det.ok:
             log("MediaPipe : DetecteurMains")
             return "cours", det
-        if getattr(det, "erreur", ""):
-            log(f"DetecteurMains : {det.erreur}")
-            erreur_mediapipe = det.erreur
+        essais.append(getattr(det, "erreur", "solutions absentes"))
     except Exception as exc:
-        log(f"DetecteurMains : {exc}")
-        erreur_mediapipe = str(exc)
+        essais.append(str(exc))
+
     det = DetecteurInline()
     if det.ok:
-        log("MediaPipe : integre dans app.py")
+        log("MediaPipe : solutions")
         erreur_mediapipe = ""
         return "cours", det
-    if getattr(det, "erreur", ""):
-        erreur_mediapipe = det.erreur
-    cmd = f'"{sys.executable}" -m pip install mediapipe'
-    log(f"Python utilisé : {sys.executable}")
-    log(f"Installe MediaPipe avec : {cmd}")
-    if not erreur_mediapipe:
-        erreur_mediapipe = "pip install mediapipe"
+    essais.append(getattr(det, "erreur", "solutions"))
+
+    det = DetecteurTasks()
+    if det.ok:
+        log("MediaPipe : tasks (nouvelle API)")
+        erreur_mediapipe = ""
+        return "cours", det
+    essais.append(getattr(det, "erreur", "tasks"))
+
+    erreur_mediapipe = essais[-1] if essais else "MediaPipe incomplet"
+    log(f"MediaPipe inutilisable : {erreur_mediapipe}")
+    log(f"Python : {sys.executable}")
     return None, None
 
 
 def commande_depuis_leves(leves) -> str | None:
     if not leves or len(leves) < 5:
         return None
+    pouce = bool(leves[0])
     index, majeur, annulaire, auriculaire = leves[1], leves[2], leves[3], leves[4]
     n = int(index) + int(majeur) + int(annulaire) + int(auriculaire)
+    if n == 0 and pouce:
+        return "BUZZER OFF"
     if n == 0:
         return "POMPE OFF"
     if n == 1 and index:
         return "POMPE ON"
     if n == 2 and index and majeur:
         return "PELTIER COOL"
-    if n >= 3:
+    if n == 3:
+        return "PELTIER HEAT"
+    if n >= 4:
         return "PELTIER OFF"
     return None
 
@@ -876,12 +1023,37 @@ def publier_geste() -> None:
         log(f"ALIVEcode geste : {exc}")
 
 
+def envoyer_plusieurs(commandes: list[str]) -> None:
+    recu = False
+    for commande in commandes:
+        if envoyer(commande):
+            recu = True
+            log(f"Envoyé à l'Arduino : {commande}")
+        else:
+            appliquer_local(commande)
+            log(f"Pas d'Arduino — simulation : {commande}")
+    if not recu:
+        log(ligne_etat())
+        pousser_aliot()
+
+
+def arreter_climat() -> None:
+    envoyer_plusieurs(["CMD;MODE=MANUAL", "CMD;PELTIER=OFF", "CMD;FAN=0"])
+
+
 def commander_geste(geste: str) -> None:
+    if geste == "PELTIER OFF":
+        arreter_climat()
+        with etat_lock:
+            etat["geste_confirme"] = geste
+        publier_geste()
+        return
     commandes = {
         "POMPE ON": "CMD;PUMP=1",
         "POMPE OFF": "CMD;PUMP=0",
         "PELTIER COOL": "CMD;PELTIER=COOL",
-        "PELTIER OFF": "CMD;PELTIER=OFF",
+        "PELTIER HEAT": "CMD;PELTIER=HEAT",
+        "BUZZER OFF": "CMD;BUZZER=0",
     }
     commande = commandes[geste]
     if envoyer(commande):
@@ -904,7 +1076,7 @@ def boucle_gestes() -> None:
     compteur = 0
     vides = 0
     deja_execute = False
-    log("Mains : poing=pompe off  1 doigt=pompe on  2=froid  ouverte=stop")
+    log("Mains : pouce=bip off  2=froid  3=chaud  ouverte=stop")
     log("Q ferme la fenetre camera")
     t_log = 0.0
     try:
@@ -958,7 +1130,7 @@ def boucle_gestes() -> None:
                     f"FERMIA - {'ARDUINO' if connecte else 'SIMULATION'}",
                     f"Doigts: {nombre if nombre is not None else '-'}  -> {nouveau}",
                     f"Pompe: {pompe}  Peltier: {peltier}  OK:{confirme}",
-                    "poing=pompe off  1=pompe on  2=froid  ouverte=stop",
+                    "pouce=bip off  2=froid  3=chaud  ouverte=stop",
                 ]
             for i, ligne in enumerate(lignes):
                 cv2.putText(
