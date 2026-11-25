@@ -47,6 +47,7 @@ camera_kind = "sim"
 camera = None
 camera_lock = threading.Lock()
 stop_event = threading.Event()
+erreur_mediapipe = ""
 FRAMES_GESTE = 6
 GESTES_MAINS = {0: "POMPE OFF", 1: "POMPE ON", 2: "PELTIER COOL", 3: "PELTIER OFF", 4: "PELTIER OFF", 5: "PELTIER OFF"}
 GESTES_NOMS = {
@@ -724,31 +725,31 @@ def executer(saisie: str) -> bool:
     return True
 
 
+def _charger_hands(confiance: float = 0.5):
+    import mediapipe as mp
+
+    solutions = getattr(mp, "solutions", None)
+    if solutions is None or not hasattr(solutions, "hands"):
+        from mediapipe.python import solutions as solutions
+    kwargs = dict(
+        static_image_mode=False,
+        max_num_hands=1,
+        min_detection_confidence=confiance,
+        min_tracking_confidence=0.5,
+    )
+    try:
+        mains = solutions.hands.Hands(model_complexity=1, **kwargs)
+    except TypeError:
+        mains = solutions.hands.Hands(**kwargs)
+    return mains, solutions.drawing_utils, solutions.hands.HAND_CONNECTIONS
+
+
 class DetecteurInline:
     def __init__(self):
         self.ok = False
         self._mains = None
         try:
-            import mediapipe as mp
-
-            self._mp = mp
-            try:
-                self._mains = mp.solutions.hands.Hands(
-                    static_image_mode=False,
-                    max_num_hands=1,
-                    model_complexity=1,
-                    min_detection_confidence=0.5,
-                    min_tracking_confidence=0.5,
-                )
-            except TypeError:
-                self._mains = mp.solutions.hands.Hands(
-                    static_image_mode=False,
-                    max_num_hands=1,
-                    min_detection_confidence=0.5,
-                    min_tracking_confidence=0.5,
-                )
-            self._dessin = mp.solutions.drawing_utils
-            self._liens = mp.solutions.hands.HAND_CONNECTIONS
+            self._mains, self._dessin, self._liens = _charger_hands(0.5)
             self.ok = True
         except Exception as exc:
             log(f"MediaPipe Hands : {exc}")
@@ -797,6 +798,7 @@ class DetecteurInline:
 
 
 def creer_detecteur():
+    global erreur_mediapipe
     try:
         from detection_mains import DetecteurMains
 
@@ -804,13 +806,20 @@ def creer_detecteur():
         if det.ok:
             log("MediaPipe : DetecteurMains")
             return "cours", det
-    except Exception:
-        pass
+        if getattr(det, "erreur", ""):
+            log(f"DetecteurMains : {det.erreur}")
+            erreur_mediapipe = det.erreur
+    except Exception as exc:
+        log(f"DetecteurMains : {exc}")
+        erreur_mediapipe = str(exc)
     det = DetecteurInline()
     if det.ok:
         log("MediaPipe : integre dans app.py")
+        erreur_mediapipe = ""
         return "cours", det
-    log("MediaPipe absent : pip install mediapipe")
+    log("MediaPipe absent : dans le .venv tape  pip install mediapipe")
+    if not erreur_mediapipe:
+        erreur_mediapipe = "No module named mediapipe"
     return None, None
 
 
@@ -933,10 +942,14 @@ def boucle_gestes() -> None:
             maintenant = time.monotonic()
             if maintenant - t_log >= 2.0:
                 t_log = maintenant
-                log(f"Cam : doigts={nombre if nombre is not None else '-'}  geste={nouveau}")
+                if det is None:
+                    log("Cam : MediaPipe absent, gestes inactifs")
+                else:
+                    log(f"Cam : doigts={nombre if nombre is not None else '-'}  geste={nouveau}")
             cv2.rectangle(image, (0, 0), (image.shape[1], 170), (25, 25, 25), -1)
             if det is None:
-                lignes = ["MediaPipe absent", "pip install mediapipe", "puis relance python app.py"]
+                detail = (erreur_mediapipe or "import mediapipe")[:60]
+                lignes = ["MediaPipe absent", "pip install mediapipe", detail]
             else:
                 lignes = [
                     f"FERMIA - {'ARDUINO' if connecte else 'SIMULATION'}",
