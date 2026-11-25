@@ -128,9 +128,6 @@ def trouver_port() -> str | None:
     force = os.environ.get("ARDUINO_PORT")
     if force:
         return force
-    for candidat in ("/dev/cu.usbmodem2101",):
-        if os.path.exists(candidat):
-            return candidat
     ignores = ("debug-console", "bluetooth", "incoming", "wlan")
     bons = []
     for port in list_ports.comports():
