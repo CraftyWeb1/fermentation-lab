@@ -124,23 +124,51 @@ def log(message: str) -> None:
         print(message, flush=True)
 
 
+def _port_interdit(nom: str, desc: str = "") -> bool:
+    texte = f"{nom} {desc}".lower()
+    return any(
+        x in texte
+        for x in ("debug-console", "debugconsole", "bluetooth", "incoming", "wlan", "bthe")
+    )
+
+
 def trouver_port() -> str | None:
     force = os.environ.get("ARDUINO_PORT")
     if force:
-        return force
-    ignores = ("debug-console", "bluetooth", "incoming", "wlan")
+        if _port_interdit(force):
+            log(f"Port ignore (pas Arduino) : {force}")
+        else:
+            return force
+
+    if Path("/dev").exists():
+        for motif in (
+            "cu.usbmodem*",
+            "tty.usbmodem*",
+            "cu.wchusbserial*",
+            "cu.usbserial*",
+            "ttyACM*",
+            "ttyUSB*",
+        ):
+            for chemin in sorted(Path("/dev").glob(motif)):
+                s = str(chemin)
+                if not _port_interdit(s):
+                    return s
+
     bons = []
     for port in list_ports.comports():
-        nom = (port.device or "").lower()
-        desc = (port.description or "").lower()
-        if any(x in nom or x in desc for x in ignores):
+        nom = port.device or ""
+        desc = port.description or ""
+        if _port_interdit(nom, desc):
             continue
-        texte = f"{nom} {desc}"
-        if any(x in texte for x in ("arduino", "ch340", "usbserial", "usbmodem", "wchusbserial", "cp210")):
-            bons.append(port.device)
+        texte = f"{nom} {desc}".lower()
+        if any(
+            x in texte
+            for x in ("arduino", "ch340", "usbserial", "usbmodem", "wchusbserial", "cp210", "ttyacm", "ttyusb")
+        ):
+            bons.append(nom)
             continue
-        if nom.startswith("/dev/ttyacm") or nom.startswith("/dev/ttyusb"):
-            bons.append(port.device)
+        if sys.platform == "win32" and nom.upper().startswith("COM"):
+            bons.append(nom)
     if bons:
         return bons[0]
     return None
