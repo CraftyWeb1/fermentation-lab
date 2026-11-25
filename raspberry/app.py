@@ -728,9 +728,7 @@ def executer(saisie: str) -> bool:
 def _charger_hands(confiance: float = 0.5):
     import mediapipe as mp
 
-    solutions = getattr(mp, "solutions", None)
-    if solutions is None or not hasattr(solutions, "hands"):
-        from mediapipe.python import solutions as solutions
+    log(f"MediaPipe {getattr(mp, '__version__', '?')}  {getattr(mp, '__file__', '?')}")
     kwargs = dict(
         static_image_mode=False,
         max_num_hands=1,
@@ -738,10 +736,10 @@ def _charger_hands(confiance: float = 0.5):
         min_tracking_confidence=0.5,
     )
     try:
-        mains = solutions.hands.Hands(model_complexity=1, **kwargs)
+        mains = mp.solutions.hands.Hands(model_complexity=1, **kwargs)
     except TypeError:
-        mains = solutions.hands.Hands(**kwargs)
-    return mains, solutions.drawing_utils, solutions.hands.HAND_CONNECTIONS
+        mains = mp.solutions.hands.Hands(**kwargs)
+    return mains, mp.solutions.drawing_utils, mp.solutions.hands.HAND_CONNECTIONS
 
 
 class DetecteurInline:
@@ -754,6 +752,7 @@ class DetecteurInline:
         except Exception as exc:
             log(f"MediaPipe Hands : {exc}")
             self.ok = False
+            self.erreur = str(exc)
 
     def fermer(self) -> None:
         if self._mains is not None:
@@ -817,9 +816,13 @@ def creer_detecteur():
         log("MediaPipe : integre dans app.py")
         erreur_mediapipe = ""
         return "cours", det
-    log("MediaPipe absent : dans le .venv tape  pip install mediapipe")
+    if getattr(det, "erreur", ""):
+        erreur_mediapipe = det.erreur
+    cmd = f'"{sys.executable}" -m pip install mediapipe'
+    log(f"Python utilisé : {sys.executable}")
+    log(f"Installe MediaPipe avec : {cmd}")
     if not erreur_mediapipe:
-        erreur_mediapipe = "No module named mediapipe"
+        erreur_mediapipe = "pip install mediapipe"
     return None, None
 
 
