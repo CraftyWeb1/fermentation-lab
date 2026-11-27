@@ -3,6 +3,8 @@
 Meme serrure Arduino : `CMD;UNLOCK` / `CMD;LOCK`.
 Deux cles : **badge** ou **voix + code**. L IA n est pas dans cette iteration.
 
+**Rien de tout ca sur l Uno** (plus de pin libre, SPI deja pris par le LCD). ReSpeaker + RC-522 = **Raspberry Pi**. Le Pi envoie `UNLOCK` / `LOCK` en USB.
+
 ## RFID (RC-522 sur le Raspberry Pi, 3,3 V)
 
 Voir le tableau de broches dans FERMIA.md § 4.9.
@@ -21,7 +23,16 @@ Sans module : `ouvrir` / `fermer` au clavier.
 
 ## Voix (ReSpeaker sur le Pi)
 
-HAT I2S, pas sur l Arduino.
+HAT I2S, **pas** sur l Arduino, **pas** sur le Mac.
+
+**Piece OK :** Keyestudio / Seeed **ReSpeaker 2 micros** pour Pi 3/4 (chapeau GPIO, LEFT/RIGHT, jack casque). Clone Keyestudio du HAT officiel = bon pour Fermia.
+
+**Pas un remplacement :**
+- **JQ6500** = lecteur MP3 serie. Il **joue** un fichier, il **n ecoute pas**.
+- **ISD1820** (plaque rouge micro + mini HP) = 10 s d enregistrement, pas de reconnaissance.
+- **L293D** (plaque verte) = pont H moteur, tu as deja le L298N.
+
+Sans ReSpeaker : micro USB (ou micro du Mac pour tester). `RECO_DEVICE=1 python app.py`
 
 ```bash
 pip install SpeechRecognition pyaudio pyttsx3

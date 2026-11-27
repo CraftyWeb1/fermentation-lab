@@ -7,7 +7,10 @@ L’IA (prédiction d’avancement et anomalies) est **prévue plus tard**, pas 
 
 ## 1. C’est quoi Fermia
 
-Fermia est un laboratoire de **fermentation intelligente** : il tient une **consigne de température** (yaourt, bière, pâte, terre, démo), **sécurise** (eau, T°, ventilo avec le Peltier), s’**ouvre et se ferme** (badge, voix + code, terminal), et se commande à distance (ALIVEcode, gestes, éventuellement ReSpeaker).
+**Présentation (jury / oral) :**  
+Fermia est un laboratoire de fermentation intelligente. Un Arduino régule la température du bain-marie (yaourt, bière, pâte, terre) avec une pastille Peltier, des ventilos, une pompe et des capteurs de chaleur, d’air et d’eau, pendant qu’un Raspberry Pi gère la caméra, un tableau de bord tactile, les gestes, le badge RFID et la voix. Le labo s’ouvre seulement avec un badge autorisé ou la phrase « Fermia, ouvre le labo » suivie d’un code ; on le commande aussi depuis ALIVEcode. L’Arduino assure la sécurité en temps réel, le Pi l’intelligence d’accès et de contrôle : ensemble, ils transforment une fermentation artisanale en un système connecté, sûr et démontrable.
+
+Fermia tient une **consigne de température** (yaourt, bière, pâte, terre, démo), **sécurise** (eau, T°, ventilo avec le Peltier), s’**ouvre et se ferme** (badge, voix + code, terminal), et se commande à distance (ALIVEcode, gestes, ReSpeaker).
 
 Ce n’est pas encore de l’IA : la régulation, ce sont des **seuils** et une hystérésis. L’IA s’ajoutera dans Python, sur les lignes `DATA;`.
 
@@ -70,12 +73,28 @@ Le Pi a **sa propre** alim USB-C. Ne l’alimente **pas** avec le 12 V.
 | 18 | **DEL RVB** cathode commune 5 mm | 5 V via D4/A2/A3 + 3× 220 Ω | 1 seule suffit |
 | 19 | **Buzzer actif 5 V** | A4 | bip quand fermentation finie |
 | 20 | **Capteur niveau d’eau** (analogique) | 5 V | **A5** — dans l’eau du bain-marie seulement |
+| 21 | **ReSpeaker 2 micros** (Keyestudio / Seeed HAT) | 5 V du **Pi** (GPIO) | **Raspberry Pi seulement**, pas l’Uno |
+
+### L’Uno est plein — rien de nouveau dessus
+
+Toutes les pins de l’Arduino sont déjà prises (LCD D8–D13, sonde, relais, L298N, MQ, eau, LED, buzzer, bouton). **On n’ajoute plus rien sur l’Uno.**
+
+| Nouveau | Où ça se branche | Pas ici |
+|---|---|---|
+| **ReSpeaker** 2 micros (Keyestudio OK) | GPIO du **Pi** (chapeau, tu clips) | Pas Mac, pas Arduino |
+| **RC-522 RFID** | SPI du **Pi**, **3,3 V** | Pas 5 V, pas l’Uno (LCD occupe déjà le SPI) |
+| **Écran / dashboard** | HDMI du Pi | — |
+| **Caméra** | nappe CSI ou USB | — |
+
+Le Pi parle à l’Uno par le **câble USB** (`CMD;UNLOCK` / `CMD;LOCK`). Pas besoin d’une pin libre.
+
+**À ne pas acheter / à ne pas brancher :** JQ6500 (lecteur MP3, n’écoute pas), ISD1820 (module rouge micro+HP, 10 s d’enregistrement), L293D (plaque verte, tu as déjà le L298N).
 
 ---
 
 ## 2.1 Raspberry Pi 4 + caméra (nappe CSI)
 
-Le Pi 4 n’a **aucun** fil GPIO vers le LCD, la pompe, le MQ, le Peltier. Seulement : **alim USB-C**, **nappe caméra**, **USB vers l’Arduino**. Le RC-522 (si tu l’as) va aussi sur le Pi, § 4.9.
+Le Pi 4 n’a **aucun** fil GPIO vers le LCD, la pompe, le MQ, le Peltier. Seulement : **alim USB-C**, **nappe caméra**, **USB vers l’Arduino**. Le **RC-522** et le **ReSpeaker** (si tu les as) vont **aussi sur le Pi**, pas sur l’Uno.
 
 ```
 Alim USB-C 5 V 3 A  ──►  Pi 4
@@ -392,6 +411,30 @@ Ce n’est **pas** un ventilo PC tout seul. C’est un **sandwich** :
 ```
 
 Les **deux** ventilos (gros + petit) sont déjà vissés sur les radiateurs. Ils doivent tourner **dès que le Peltier est ON** (chauffe **ou** froid), sinon le module grille.
+
+Le ventilo **ne change pas de sens** entre chaud et froid. C’est normal. Il souffle toujours pareil. C’est la **pastille** (L298N) qui inverse. Les ventilos évacuent la chaleur dès que le Peltier est ON.
+
+**Erreur fréquente — 4 fils vissés sur l’adaptateur 12 V :**  
+Si tu visse les **2 rouges + 2 noirs** des 2 ventilos **directement** sur le chargeur, ils tournent **sans arrêt**. L’Arduino ne commande rien. Il faut le **relais D7** entre le +12 V et les rouges.
+
+**Deux circuits 12 V, même chargeur, pas les mêmes vis :**
+
+```
+CHARGEUR / ADAPTATEUR 12 V
+   +  ──►  vis COM du relais D7     ET  vis +12V / VS du L298N
+   −  ──►  2 noirs des ventilos     ET  vis GND du L298N (+ GND Arduino)
+
+VENTILOS (relais seulement)
+   COM relais  =  +12 V du chargeur
+   NO  relais  =  2 fils ROUGES des ventilos
+   2 NOIRS     =  − du chargeur
+
+PELTIER (L298N seulement, pas le relais)
+   2 fils du milieu (pastille)  =  OUT1 et OUT2
+   IN1 = D6 (chauffe)   IN2 = A1 (froid)
+```
+
+Les rouges des ventilos vont sur **NO** du relais, **pas** sur COM, **pas** avec le Peltier.
 
 **Fils : ne pas tout mélanger**
 
@@ -875,7 +918,10 @@ Pas encore dans ces codes :
 | Python : accès COM refusé | Fermer le Moniteur série, bon `ARDUINO_PORT` |
 | Caméra absente | `$env:CAMERA=1` |
 | Pompe toujours ON | Polarité relais / `RELAIS_ACTIF_LOW` |
+| Ventilo **toujours ON** | Les 4 fils sont sur l’adaptateur : passer les **rouges** par le relais **D7** (NO). Petit côté du relais : 5 V, GND, IN=D7 |
+| Ventilo ne « change » pas chaud/froid | Normal : le ventilo ne s’inverse pas. Le Peltier oui (L298N OUT1/OUT2) |
 | Rien après `chauffer` | Arduino bien connecté, ligne `Envoyé à l'Arduino` |
+| `stop` mais le ventilo repart | Mode AUTO : si T° ≪ consigne il rechauffe. `stop` doit envoyer `MODE=MANUAL` + `PELTIER=OFF` |
 
 ---
 
