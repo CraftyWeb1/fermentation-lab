@@ -1,0 +1,47 @@
+{
+  "object": "fermia",
+  "fields": [
+    { "name": "temperature", "doc": "/doc/temperature", "type": "number" },
+    { "name": "consigne", "doc": "/doc/consigne", "type": "number" },
+    { "name": "profil", "doc": "/doc/profil", "type": "string" },
+    { "name": "mode", "doc": "/doc/mode", "type": "string" },
+    { "name": "peltier", "doc": "/doc/peltier", "type": "string" },
+    { "name": "pompe", "doc": "/doc/pompe", "type": "string" },
+    { "name": "ventilo", "doc": "/doc/ventilo", "type": "string" },
+    { "name": "air", "doc": "/doc/air", "type": "string" },
+    { "name": "air_brut", "doc": "/doc/air_brut", "type": "integer" },
+    { "name": "eau", "doc": "/doc/eau", "type": "integer" },
+    { "name": "eau_ok", "doc": "/doc/eau_ok", "type": "string" },
+    { "name": "ok", "doc": "/doc/ok", "type": "integer" },
+    { "name": "ouvert", "doc": "/doc/ouvert", "type": "integer" },
+    { "name": "fini", "doc": "/doc/fini", "type": "integer" },
+    { "name": "arduino", "doc": "/doc/arduino", "type": "integer" },
+    { "name": "buzzer", "doc": "/doc/buzzer", "type": "integer" },
+    { "name": "lcd_message", "doc": "/doc/lcd_message", "type": "string" },
+    { "name": "geste", "doc": "/doc/geste", "type": "string" },
+    { "name": "acces", "doc": "/doc/acces", "type": "string" }
+  ],
+  "data": [
+    {
+      "temperature": 16.06,
+      "consigne": 42,
+      "profil": "YAOURT",
+      "mode": "AUTO",
+      "peltier": "HEAT",
+      "pompe": "OFF",
+      "ventilo": "ON",
+      "air": "BON",
+      "air_brut": 158,
+      "eau": 40,
+      "eau_ok": "BASSE",
+      "ok": 1,
+      "ouvert": 1,
+      "fini": 0,
+      "arduino": 1,
+      "buzzer": 0,
+      "lcd_message": "T:16.1C YAOURT | ROUGE: EAU BASSE",
+      "geste": "AUCUN",
+      "acces": "RFID"
+    }
+  ]
+}

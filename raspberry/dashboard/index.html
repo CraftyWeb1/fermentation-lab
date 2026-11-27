@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>Fermia</title>
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin: 0; height: 100%; background: #12160f; color: #e8f5e0; font-family: system-ui, sans-serif; }
+    body { display: flex; flex-direction: column; padding: 10px; gap: 8px; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    h1 { margin: 0; font-size: 1.4rem; letter-spacing: 0.08em; }
+    .pill { padding: 6px 12px; border-radius: 999px; font-weight: 700; font-size: 0.9rem; }
+    .ok { background: #2e7d32; } .ko { background: #8b1e1e; }
+    .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    .card { background: #1c2418; border-radius: 12px; padding: 10px 12px; }
+    .card b { display: block; font-size: 0.7rem; color: #9aaa90; text-transform: uppercase; }
+    .card span { font-size: 1.25rem; font-weight: 700; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; }
+    button {
+      flex: 1 1 22%; min-height: 56px; border: 0; border-radius: 12px;
+      background: #2a3826; color: #e8f5e0; font-size: 1rem; font-weight: 700;
+    }
+    button:active { transform: scale(0.97); background: #3d5240; }
+    button.chaud { background: #8a3a12; }
+    button.froid { background: #1a4a6e; }
+    button.stop { background: #5a1e1e; }
+    button.ouv { background: #1e5a32; }
+    .lcd { background: #0d1a0c; color: #9cff7a; font-family: ui-monospace, monospace; padding: 10px; border-radius: 8px; min-height: 44px; }
+    .hint { font-size: 0.75rem; color: #8a9a82; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>FERMIA</h1>
+    <div id="lien" class="pill ko">…</div>
+  </header>
+  <div class="lcd" id="lcd">—</div>
+  <div class="grid">
+    <div class="card"><b>Température</b><span id="temp">--</span></div>
+    <div class="card"><b>Consigne</b><span id="sp">--</span></div>
+    <div class="card"><b>Profil</b><span id="profil">--</span></div>
+    <div class="card"><b>Mode</b><span id="mode">--</span></div>
+    <div class="card"><b>Peltier</b><span id="peltier">--</span></div>
+    <div class="card"><b>Pompe</b><span id="pompe">--</span></div>
+    <div class="card"><b>Ventilo</b><span id="ventilo">--</span></div>
+    <div class="card"><b>Air</b><span id="air">--</span></div>
+    <div class="card"><b>Eau</b><span id="eau">--</span></div>
+    <div class="card"><b>Labo</b><span id="ouvert">--</span></div>
+    <div class="card"><b>Accès</b><span id="acces">--</span></div>
+    <div class="card"><b>Geste</b><span id="geste">--</span></div>
+  </div>
+  <div class="hint">Recettes</div>
+  <div class="row">
+    <button data-cmd="yaourt">Yaourt</button>
+    <button data-cmd="biere">Bière</button>
+    <button data-cmd="pate">Pâte</button>
+    <button data-cmd="terre">Terre</button>
+    <button data-cmd="demo">Démo</button>
+  </div>
+  <div class="hint">Climat</div>
+  <div class="row">
+    <button class="chaud" data-cmd="chauffer">Chaud</button>
+    <button class="froid" data-cmd="refroidir">Froid</button>
+    <button class="stop" data-cmd="stop">Stop</button>
+    <button data-cmd="auto">Auto</button>
+  </div>
+  <div class="hint">Actionneurs</div>
+  <div class="row">
+    <button data-cmd="von">Ventilo on</button>
+    <button data-cmd="voff">Ventilo off</button>
+    <button data-cmd="silence">Silence</button>
+  </div>
+  <div class="hint">Accès</div>
+  <div class="row">
+    <button class="ouv" data-cmd="ouvrir">Ouvrir</button>
+    <button class="stop" data-cmd="fermer">Fermer</button>
+  </div>
+<script>
+async function etat() {
+  try {
+    const r = await fetch("/api/etat");
+    const e = await r.json();
+    const on = (v) => v ? "ON" : "OFF";
+    document.getElementById("temp").textContent = e.temp == null ? "--" : e.temp.toFixed(1) + " °C";
+    document.getElementById("sp").textContent = e.sp == null ? "--" : e.sp.toFixed(0) + " °C";
+    document.getElementById("profil").textContent = e.profile || "--";
+    document.getElementById("mode").textContent = e.mode || "--";
+    document.getElementById("peltier").textContent = e.peltier || "--";
+    document.getElementById("pompe").textContent = on(e.pump);
+    document.getElementById("ventilo").textContent = on(e.fan);
+    document.getElementById("air").textContent = (e.aq || "--") + (e.air != null ? " " + e.air : "");
+    document.getElementById("eau").textContent = e.wet ? "OK" : "BASSE";
+    document.getElementById("ouvert").textContent = e.lock ? "FERMÉ" : "OUVERT";
+    document.getElementById("acces").textContent = e.acces || "--";
+    document.getElementById("geste").textContent = e.geste || "--";
+    document.getElementById("lcd").textContent = e.lcd || "";
+    const p = document.getElementById("lien");
+    p.textContent = e.connected ? "Arduino" : "SIMU";
+    p.className = "pill " + (e.connected ? "ok" : "ko");
+  } catch (err) {}
+}
+async function cmd(c) {
+  await fetch("/api/cmd", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cmd: c }),
+  });
+  etat();
+}
+document.querySelectorAll("button[data-cmd]").forEach((b) => {
+  b.addEventListener("click", () => cmd(b.dataset.cmd));
+});
+setInterval(etat, 800);
+etat();
+</script>
+</body>
+</html>

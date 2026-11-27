@@ -1,0 +1,7 @@
+.venv/
+config.ini
+code_acces.txt
+__pycache__/
+captures/
+models/
+*.pyc

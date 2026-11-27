@@ -1,0 +1,4 @@
+# Un UID par ligne (sans espaces). Le terminal affiche l'UID au premier passage.
+# Copie-colle ici pour autoriser. Un badge autorise ouvre ou ferme le labo.
+# Exemple :
+# A1B2C3D4
